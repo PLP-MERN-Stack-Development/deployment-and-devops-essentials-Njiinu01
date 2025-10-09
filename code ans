@@ -1,0 +1,171 @@
+
+## 1) Root: `.env.example`
+
+```env
+# Backend
+PORT=3000
+MONGODB_URI=mongodb+srv://<user>:<password>@cluster0.mongodb.net/mydb?retryWrites=true&w=majority
+JWT_SECRET=your_jwt_secret_here
+NODE_ENV=production
+LOG_LEVEL=info
+SENTRY_DSN=
+
+# Frontend (CRA/Vite)
+REACT_APP_API_URL=https://api.example.com
+REACT_APP_SENTRY_DSN=
+
+# CI/CD and external services (store real values in platform secrets)
+VERCEL_TOKEN=
+HEROKU_API_KEY=
+SENTRY_AUTH_TOKEN=
+```
+
+---
+
+## 2) Root: `Procfile` (Heroku)
+
+```procfile
+web: node server/server.js
+```
+
+---
+
+## 3) Root: `Dockerfile` (multi-stage for smaller images)
+
+```dockerfile
+# Stage 1: build frontend
+FROM node:18-alpine AS builder
+WORKDIR /app
+COPY client/package*.json ./client/
+COPY client/ ./client/
+RUN cd client && npm ci && npm run build
+
+# Stage 2: build server
+FROM node:18-alpine AS server
+WORKDIR /app
+# copy server
+COPY server/package*.json ./server/
+COPY server/ ./server/
+# copy frontend build into server public folder
+COPY --from=builder /app/client/build ./server/public
+
+WORKDIR /app/server
+RUN npm ci --production
+ENV NODE_ENV=production
+EXPOSE 3000
+CMD ["node", "server.js"]
+```
+
+---
+
+## 4) `server/db.js` — Mongoose connection with pooling and graceful shutdown
+
+```js
+// server/db.js
+const mongoose = require('mongoose');
+const logger = require('./logger');
+
+const connectDB = async () => {
+  const uri = process.env.MONGODB_URI;
+  if (!uri) throw new Error('MONGODB_URI not set');
+
+  try {
+    await mongoose.connect(uri, {
+      maxPoolSize: parseInt(process.env.MONGO_POOL_SIZE || '50', 10),
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
+      family: 4,
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    });
+    logger.info('MongoDB connected');
+  } catch (err) {
+    logger.error('MongoDB connection error', err);
+    throw err;
+  }
+};
+
+const closeDB = async () => {
+  try {
+    await mongoose.disconnect();
+    logger.info('MongoDB disconnected');
+  } catch (err) {
+    logger.error('Error disconnecting MongoDB', err);
+  }
+};
+
+module.exports = { connectDB, closeDB };
+```
+
+---
+
+## 5) `server/logger.js` — Winston logger (structured logs to stdout)
+
+```js
+// server/logger.js
+const { createLogger, format, transports } = require('winston');
+
+const logger = createLogger({
+  level: process.env.LOG_LEVEL || 'info',
+  format: format.combine(
+    format.timestamp(),
+    format.errors({ stack: true }),
+    format.splat(),
+    format.json()
+  ),
+  defaultMeta: { service: 'mern-app' },
+  transports: [new transports.Console()],
+});
+
+module.exports = logger;
+```
+
+---
+
+## 6) `server/errorHandler.js` — centralized error handler
+
+```js
+// server/errorHandler.js
+const logger = require('./logger');
+
+function errorHandler(err, req, res, next) {
+  logger.error('Unhandled error: %o', err);
+  const status = err.status || 500;
+  const payload = {
+    message: status === 500 ? 'Internal Server Error' : err.message,
+  };
+  if (process.env.NODE_ENV !== 'production') {
+    payload.stack = err.stack;
+  }
+  res.status(status).json(payload);
+}
+
+module.exports = errorHandler;
+```
+
+---
+
+## 7) `server/server.js` — Express server skeleton (health checks, helmet, logging, Sentry optional)
+
+```js
+// server/server.js
+require('dotenv').config();
+const express = require('express');
+const helmet = require('helmet');
+const morgan = require('morgan');
+const path = require('path');
+const { connectDB, closeDB } = require('./db');
+const logger = require('./logger');
+const errorHandler = require('./errorHandler');
+
+// Optional Sentry
+if (process.env.SENTRY_DSN) {
+  const Sentry = require('@sentry/node');
+  Sentry.init({ dsn: process.env.SENTRY_DSN });
+}
+
+const app = express();
+app.use(helmet());
+app.use(express.json());
+app.use(morgan('combined'
+```
